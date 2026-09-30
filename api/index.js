@@ -13,35 +13,54 @@ const BHARATPE_CONFIG = {
 app.get('/api/check', async (req, res) => {
     const amount = parseFloat(req.query.amount);
 
-    // Try primary BharatPe dashboard API
-    const endpoints = [
-        `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${BHARATPE_CONFIG.merchantId}`,
-        `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${BHARATPE_CONFIG.merchantId}&module=PAYMENT`,
-        `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions/recent?merchantId=${BHARATPE_CONFIG.merchantId}`
+    if (!amount || isNaN(amount)) {
+        return res.status(400).json({ status: "ERROR", message: "Amount missing" });
+    }
+
+    // Dates in YYYY-MM-DD
+    const today = new Date().toISOString().split('T')[0];
+    const yesterday = new Date(Date.now() - 86400000).toISOString().split('T')[0];
+
+    // Try multiple standard query variations for BharatPe
+    const attempts = [
+        {
+            url: `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${BHARATPE_CONFIG.merchantId}&sDate=${yesterday}&eDate=${today}`,
+            headers: { 'token': BHARATPE_CONFIG.token, 'Cookie': BHARATPE_CONFIG.cookie }
+        },
+        {
+            url: `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?userId=${BHARATPE_CONFIG.merchantId}&limit=10`,
+            headers: { 'token': BHARATPE_CONFIG.token, 'Cookie': BHARATPE_CONFIG.cookie }
+        },
+        {
+            url: `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${BHARATPE_CONFIG.merchantId}&limit=10`,
+            headers: { 
+                'token': BHARATPE_CONFIG.token,
+                'Cookie': `token=${BHARATPE_CONFIG.cookie}`
+            }
+        }
     ];
 
-    let lastError = null;
+    let lastErr = null;
 
-    for (const url of endpoints) {
+    for (const attempt of attempts) {
         try {
-            const response = await axios.get(url, {
+            const response = await axios.get(attempt.url, {
                 headers: {
-                    'token': BHARATPE_CONFIG.token,
-                    'Token': BHARATPE_CONFIG.token,
-                    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                    'Cookie': `token=${BHARATPE_CONFIG.token}; session=${BHARATPE_CONFIG.cookie}; bharatpe_session=${BHARATPE_CONFIG.cookie}`,
-                    'accept': 'application/json, text/plain, */*'
+                    ...attempt.headers,
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                    'Accept': 'application/json, text/plain, */*'
                 },
-                timeout: 6000
+                timeout: 5000
             });
 
-            const txns = response.data?.data?.transactions || response.data?.data || response.data?.transactions || [];
+            const data = response.data;
+            const txns = data?.data?.transactions || data?.transactions || (Array.isArray(data?.data) ? data.data : []);
 
             for (const t of txns) {
-                const txnAmount = parseFloat(t.amount || t.txnAmount);
-                const statusUpper = String(t.status || t.txnStatus || '').toUpperCase();
+                const txnAmount = parseFloat(t.amount || t.txnAmount || 0);
+                const statusStr = String(t.status || t.txnStatus || '').toUpperCase();
 
-                if (txnAmount === amount && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper)) {
+                if (txnAmount === amount && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusStr)) {
                     return res.json({
                         status: "COMPLETED",
                         amount: txnAmount,
@@ -52,25 +71,24 @@ app.get('/api/check', async (req, res) => {
 
             return res.json({
                 status: "PENDING",
-                message: "Fetched successfully, payment not matched yet",
-                recent_count: txns.length
+                message: "Fetched BharatPe successfully, payment not matched",
+                txns_found: txns.length
             });
 
-        } catch (err) {
-            lastError = {
-                endpoint: url,
-                status: err.response?.status,
-                data: err.response?.data || err.message
+        } catch (e) {
+            lastErr = {
+                url: attempt.url,
+                msg: e.response?.data || e.message
             };
         }
     }
 
     return res.status(500).json({
         status: "ERROR",
-        debug_info: lastError
+        last_failed_attempt: lastErr
     });
 });
 
-app.get('/', (req, res) => res.send("Running"));
+app.get('/', (req, res) => res.send("BharatPe Verify Engine Running"));
 
 module.exports = app;
