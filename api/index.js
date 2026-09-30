@@ -4,7 +4,6 @@ const axios = require('axios');
 const app = express();
 app.use(express.json());
 
-// BHARATPE CREDENTIALS
 const BHARATPE_CONFIG = {
     merchantId: "67978226",
     token: "e1166dc3665a462997e43c6a6b87154d",
@@ -15,39 +14,43 @@ app.get('/api/check', async (req, res) => {
     const amount = parseFloat(req.query.amount);
 
     if (!amount || isNaN(amount)) {
-        return res.status(400).json({ 
-            status: "ERROR", 
-            message: "Amount is required. Example: /api/check?amount=1" 
-        });
+        return res.status(400).json({ status: "ERROR", message: "Amount required. Example: ?amount=1" });
     }
 
     try {
-        // Today's date format: YYYY-MM-DD
-        const today = new Date().toISOString().split('T')[0];
-        
-        // BharatPe Tesseract Transactions API with proper required params
-        const bpeUrl = `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${BHARATPE_CONFIG.merchantId}&fromDate=${today}&toDate=${today}&limit=20`;
-        
+        // BharatPe exact date format: DD-MM-YYYY
+        const now = new Date();
+        const pad = (n) => String(n).padStart(2, '0');
+        const todayStr = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}`;
+
+        // Yesterday
+        const y = new Date(Date.now() - 24 * 60 * 60 * 1000);
+        const yestStr = `${pad(y.getDate())}-${pad(y.getMonth() + 1)}-${y.getFullYear()}`;
+
+        // URL with BharatPe required query parameters
+        const bpeUrl = `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${BHARATPE_CONFIG.merchantId}&fromDate=${yestStr}&toDate=${todayStr}&module=PAYMENT&page=1&limit=20`;
+
         const response = await axios.get(bpeUrl, {
             headers: {
                 'token': BHARATPE_CONFIG.token,
-                'Cookie': `token=${BHARATPE_CONFIG.cookie}; PHPSESSID=${BHARATPE_CONFIG.cookie}`,
+                'Cookie': BHARATPE_CONFIG.cookie,
+                'Accept': 'application/json, text/plain, */*',
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
             },
-            timeout: 7000
+            timeout: 8000
         });
 
-        const txns = response.data?.data?.transactions || [];
+        const txns = response.data?.data?.transactions || response.data?.transactions || [];
 
         for (const t of txns) {
-            const txnAmount = parseFloat(t.amount);
-            const statusUpper = String(t.status || '').toUpperCase();
+            const txnAmount = parseFloat(t.amount || t.txnAmount);
+            const statusUpper = String(t.status || t.txnStatus || '').toUpperCase();
 
             if (txnAmount === amount && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper)) {
                 return res.json({
                     status: "COMPLETED",
                     amount: txnAmount,
-                    utr: t.bankReferenceNo || t.transactionId || 'N/A',
+                    utr: t.bankReferenceNo || t.transactionId || t.bankRefNo || 'N/A',
                     payer_name: t.payerName || 'N/A'
                 });
             }
@@ -55,7 +58,7 @@ app.get('/api/check', async (req, res) => {
 
         return res.json({
             status: "PENDING",
-            message: "Payment not found in recent records"
+            message: "Payment not received yet"
         });
 
     } catch (error) {
@@ -67,7 +70,7 @@ app.get('/api/check', async (req, res) => {
 });
 
 app.get('/', (req, res) => {
-    res.send("BharatPe Auto-Verify API is running live!");
+    res.send("BharatPe Auto-Verify API is running!");
 });
 
 module.exports = app;
