@@ -1,257 +1,144 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const axios = require('axios');
 const crypto = require('crypto');
 
 const app = express();
 app.use(express.json());
 
-// MongoDB Models
-const Merchant = mongoose.models.Merchant || mongoose.model('Merchant', new mongoose.Schema({
-    userId: { type: Number, unique: true },
-    apiKey: { type: String, unique: true },
-    merchantId: String,
-    upiId: String,
-    token: String,
-    cookie: String,
-    step: { type: String, default: 'IDLE' }
-}));
+// ==========================================
+// AAPKI VERIFIED BHARATPE DETAILS
+// ==========================================
+const MY_CONFIG = {
+    merchantId: "67978226",
+    upiId: "BHARATPE.9K0O0W0A8H734919@unitype",
+    token: "e1166dc3665a462997e43c6a6b87154d",
+    cookie: "eyJpdiI6ImpWaEg3d004ck5UeWNzcUtrUDM2dFE9PSIsInZhbHVlIjoiZmYxOU9cL1I4d2JFQWdqelVWeHh2UFRERXBxbTVYWSs4U0FwbGNRSHREeGlva2pmSng0dWljNzcwTnpsaTZ5SlwvODhwbFNRR0J4ZXlETTJwb0pjOXVDbFdrUTlqcWI4bnNvMmFWS1A3S0Z0bUthQnlkVjdQTWl6VmFueVE4WDJaNiIsIm1hYyI6IjIzZjhlZDAwMDZiNjY4Mjg4NmZlNzk0YWI3YmYyMjFhYjQzZjJmZmM5YmY0NmQ1YTVkMzRkN2E0ZWYwN2VmNzEifQ=="
+};
 
-const Order = mongoose.models.Order || mongoose.model('Order', new mongoose.Schema({
-    orderId: { type: String, unique: true },
-    apiKey: String,
-    amount: Number,
-    status: { type: String, default: 'PENDING' },
-    createdAt: { type: Date, default: Date.now },
-    expiresAt: Date,
-    utr: String
-}));
+// In-memory active payments tracker
+const orders = {};
 
-// DB Connection Helper
-async function connectDB() {
-    if (mongoose.connection.readyState === 0) {
-        await mongoose.connect(process.env.MONGO_URI);
+// ------------------------------------------
+// 1. CHECKOUT UI (QR + 10-MIN TIMER + AUTO DETECT)
+// ------------------------------------------
+app.get('/pay', (req, res) => {
+    const amount = req.query.amount;
+    if (!amount) {
+        return res.status(400).send("Amount missing! Use format: /pay?amount=100");
     }
-}
-
-// Telegram Message Helper
-async function sendTgMessage(chatId, text, replyMarkup = null) {
-    const url = `https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`;
-    const payload = { chat_id: chatId, text: text, parse_mode: 'HTML' };
-    if (replyMarkup) payload.reply_markup = replyMarkup;
-    await axios.post(url, payload).catch(err => console.error(err.message));
-}
-
-// -------------------------------------------------------------
-// 1. TELEGRAM BOT WEBHOOK (Step-by-Step Setup)
-// -------------------------------------------------------------
-app.post('/api/webhook', async (req, res) => {
-    await connectDB();
-    const update = req.body;
-    if (!update || !update.message) return res.send('OK');
-
-    const chatId = update.message.chat.id;
-    const text = update.message.text ? update.message.text.trim() : '';
-
-    let user = await Merchant.findOne({ userId: chatId });
-    if (!user) {
-        user = new Merchant({ userId: chatId, step: 'IDLE' });
-        await user.save();
-    }
-
-    if (text === '/start') {
-        user.step = 'IDLE';
-        await user.save();
-        const keyboard = {
-            keyboard: [[{ text: '⚙️ SETUP BHARATPE GATEWAY' }]],
-            resize_keyboard: true
-        };
-        await sendTgMessage(chatId, '👋 <b>Welcome to BharatPe Gateway Creator!</b>\n\nNiche diye button par tap karke apna gateway setup karein.', keyboard);
-        return res.send('OK');
-    }
-
-    if (text === '⚙️ SETUP BHARATPE GATEWAY') {
-        user.step = 'AWAITING_MERCHANT_ID';
-        await user.save();
-        await sendTgMessage(chatId, '👉 <b>Step 1/4:</b> Apna <b>BharatPe Merchant ID</b> bhejein:\n\n<i>(Example: 12345678)</i>');
-        return res.send('OK');
-    }
-
-    if (user.step === 'AWAITING_MERCHANT_ID') {
-        user.merchantId = text;
-        user.step = 'AWAITING_UPI_ID';
-        await user.save();
-        await sendTgMessage(chatId, '👉 <b>Step 2/4:</b> Apni <b>BharatPe UPI ID</b> bhejein:\n\n<i>(Example: username@yesbankltd)</i>');
-        return res.send('OK');
-    }
-
-    if (user.step === 'AWAITING_UPI_ID') {
-        user.upiId = text;
-        user.step = 'AWAITING_TOKEN';
-        await user.save();
-        await sendTgMessage(chatId, '👉 <b>Step 3/4:</b> Apna <b>BharatPe Token</b> paste karein:');
-        return res.send('OK');
-    }
-
-    if (user.step === 'AWAITING_TOKEN') {
-        user.token = text;
-        user.step = 'AWAITING_COOKIE';
-        await user.save();
-        await sendTgMessage(chatId, '👉 <b>Step 4/4:</b> Apni <b>BharatPe Cookie</b> paste karein:');
-        return res.send('OK');
-    }
-
-    if (user.step === 'AWAITING_COOKIE') {
-        user.cookie = text;
-        user.apiKey = 'key_' + crypto.randomBytes(6).toString('hex');
-        user.step = 'IDLE';
-        await user.save();
-
-        const host = req.headers.host;
-        const msg = `🎉 <b>Gateway Setup Successful!</b>\n\n` +
-                    `🔑 <b>API Key:</b>\n<code>${user.apiKey}</code>\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━\n` +
-                    `🌐 <b>Checkout Page (10m Expiry + Auto Detect):</b>\n` +
-                    `<code>https://${host}/pay?api_key=${user.apiKey}&amount=100</code>\n\n` +
-                    `━━━━━━━━━━━━━━━━━━━\n` +
-                    `⚙️ <b>Check Order Status API:</b>\n` +
-                    `<code>https://${host}/api/order/check?order_id=ORDER_ID</code>`;
-
-        await sendTgMessage(chatId, msg);
-        return res.send('OK');
-    }
-
-    return res.send('OK');
-});
-
-// -------------------------------------------------------------
-// 2. CHECKOUT PAGE (Dynamic QR + 10-Min Timer + Auto Detection)
-// -------------------------------------------------------------
-app.get('/pay', async (req, res) => {
-    await connectDB();
-    const { api_key, amount } = req.query;
-
-    if (!api_key || !amount) return res.status(400).send('Missing api_key or amount');
-
-    const merchant = await Merchant.findOne({ apiKey: api_key });
-    if (!merchant) return res.status(401).send('Invalid API Key');
 
     const orderId = 'ORD' + crypto.randomBytes(4).toString('hex').toUpperCase();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    const expiresAt = Date.now() + 10 * 60 * 1000;
 
-    await Order.create({
-        orderId,
-        apiKey: api_key,
+    orders[orderId] = {
         amount: parseFloat(amount),
-        expiresAt
-    });
+        status: 'PENDING',
+        expiresAt: expiresAt
+    };
 
-    const upiIntent = `upi://pay?pa=${merchant.upiId}&pn=Merchant&am=${amount}&cu=INR&tn=${orderId}`;
-    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiIntent)}`;
+    const upiIntent = `upi://pay?pa=${MY_CONFIG.upiId}&pn=Merchant&am=${amount}&cu=INR&tn=${orderId}`;
+    const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=320x320&data=${encodeURIComponent(upiIntent)}`;
 
     const html = `
     <!DOCTYPE html>
-    <html>
+    <html lang="en">
     <head>
+        <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>Fast UPI Checkout</title>
         <style>
-            body { font-family: -apple-system, sans-serif; background: #0f172a; color: #fff; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; }
-            .box { background: #1e293b; padding: 25px; border-radius: 16px; width: 90%; max-width: 350px; text-align: center; }
-            .amt { font-size: 28px; font-weight: bold; color: #38bdf8; margin: 10px 0; }
-            .qr { background: #fff; padding: 12px; border-radius: 10px; display: inline-block; }
-            .qr img { width: 200px; height: 200px; display: block; }
-            .timer { color: #f87171; font-weight: bold; margin-bottom: 12px; }
-            .btn { display: block; background: #2563eb; color: #fff; text-decoration: none; padding: 12px; border-radius: 8px; margin-top: 15px; font-weight: bold; }
+            * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+            body { background: #0b0f19; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 15px; }
+            .card { background: #1e293b; border: 1px solid #334155; border-radius: 20px; padding: 25px; width: 100%; max-width: 360px; text-align: center; box-shadow: 0 10px 25px rgba(0,0,0,0.4); }
+            .badge { display: inline-block; background: #0284c7; color: #fff; font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 20px; margin-bottom: 10px; }
+            .amount { font-size: 36px; font-weight: 800; color: #38bdf8; margin-bottom: 6px; }
+            .timer { font-size: 13px; font-weight: 600; color: #f87171; margin-bottom: 14px; }
+            .qr-wrap { background: #ffffff; padding: 12px; border-radius: 12px; display: inline-block; }
+            .qr-wrap img { width: 200px; height: 200px; display: block; }
+            .status-text { margin-top: 14px; font-size: 13px; color: #94a3b8; }
+            .btn { display: block; margin-top: 15px; background: #2563eb; color: #ffffff; font-weight: 700; text-decoration: none; padding: 12px; border-radius: 8px; font-size: 14px; }
         </style>
     </head>
     <body>
-        <div class="box" id="card">
-            <h3>Scan & Pay</h3>
-            <div class="amt">₹${amount}</div>
-            <div class="timer" id="t">Time Left: 10:00</div>
-            <div class="qr"><img src="${qrUrl}"></div>
-            <p id="msg" style="color:#94a3b8; font-size: 13px;">Checking payment automatically...</p>
-            <a href="${upiIntent}" class="btn">Open UPI App</a>
+        <div class="card" id="card">
+            <div class="badge">UPI AUTO VERIFY</div>
+            <div class="amount">₹${amount}</div>
+            <div class="timer" id="t">Expires in: 10:00</div>
+            <div class="qr-wrap"><img src="${qrUrl}" alt="QR"></div>
+            <div class="status-text" id="status">Waiting for payment...</div>
+            <a href="${upiIntent}" class="btn">Pay via UPI App</a>
         </div>
+
         <script>
             let sec = 600;
-            const tElem = document.getElementById('t');
+            const t = document.getElementById('t');
             const timer = setInterval(() => {
                 if (sec <= 0) {
                     clearInterval(timer);
-                    document.getElementById('card').innerHTML = '<h2 style="color:#f87171">QR Expired!</h2><p>Please initiate again.</p>';
+                    document.getElementById('card').innerHTML = '<h2 style="color:#f87171; margin-bottom:8px;">Expired</h2><p style="color:#94a3b8;">Please create a new link.</p>';
                 } else {
                     let m = Math.floor(sec / 60);
                     let s = sec % 60;
-                    tElem.innerText = 'Time Left: ' + m + ':' + (s < 10 ? '0' : '') + s;
+                    t.innerText = 'Expires in: ' + m + ':' + (s < 10 ? '0' : '') + s;
                     sec--;
                 }
             }, 1000);
 
-            const check = setInterval(async () => {
-                if (sec <= 0) return clearInterval(check);
+            const checker = setInterval(async () => {
+                if (sec <= 0) return clearInterval(checker);
                 try {
-                    let r = await fetch('/api/order/check?order_id=${orderId}');
-                    let d = await r.json();
-                    if (d.status === 'COMPLETED') {
-                        clearInterval(check);
+                    const res = await fetch('/api/check?order_id=${orderId}');
+                    const data = await res.json();
+                    if (data.status === 'COMPLETED') {
+                        clearInterval(checker);
                         clearInterval(timer);
-                        document.getElementById('card').innerHTML = '<h2 style="color:#4ade80">✅ Payment Received!</h2><p>UTR: ' + d.utr + '</p><p>Amount: ₹' + d.amount + '</p>';
+                        document.getElementById('card').innerHTML = '<h2 style="color:#4ade80;font-size:24px;margin-bottom:12px;">✅ Payment Successful!</h2><p style="color:#cbd5e1;font-size:15px;margin-bottom:6px;"><b>Amount:</b> ₹' + data.amount + '</p><p style="color:#cbd5e1;font-size:13px;"><b>UTR:</b> ' + data.utr + '</p>';
                     }
                 } catch(e) {}
-            }, 4000);
+            }, 3500);
         </script>
     </body>
-    </html>`;
+    </html>
+    `;
 
     res.send(html);
 });
 
-// -------------------------------------------------------------
-// 3. AUTO-DETECT BHARATPE STATUS API
-// -------------------------------------------------------------
-app.get('/api/order/check', async (req, res) => {
-    await connectDB();
+// ------------------------------------------
+// 2. AUTO VERIFY ENGINE (BharatPe Sync)
+// ------------------------------------------
+app.get('/api/check', async (req, res) => {
     const { order_id } = req.query;
+    const order = orders[order_id];
 
-    const order = await Order.findOne({ orderId: order_id });
     if (!order) return res.status(404).json({ status: 'NOT_FOUND' });
+    if (order.status === 'COMPLETED') return res.json(order);
 
-    if (order.status === 'COMPLETED') {
-        return res.json({ status: 'COMPLETED', utr: order.utr, amount: order.amount });
-    }
-
-    if (new Date() > new Date(order.expiresAt)) {
+    if (Date.now() > order.expiresAt) {
         order.status = 'EXPIRED';
-        await order.save();
         return res.json({ status: 'EXPIRED' });
     }
 
-    const merchant = await Merchant.findOne({ apiKey: order.apiKey });
-    if (!merchant) return res.status(500).json({ status: 'ERROR' });
-
     try {
-        const bpeUrl = `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${merchant.merchantId}&limit=15`;
-        const resp = await axios.get(bpeUrl, {
+        const bpeUrl = `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${MY_CONFIG.merchantId}&limit=10`;
+        const response = await axios.get(bpeUrl, {
             headers: {
-                token: merchant.token,
-                Cookie: merchant.cookie,
+                'token': MY_CONFIG.token,
+                'Cookie': MY_CONFIG.cookie,
                 'User-Agent': 'Mozilla/5.0'
             },
             timeout: 5000
         });
 
-        const txns = resp.data?.data?.transactions || [];
+        const txns = response.data?.data?.transactions || [];
         for (const t of txns) {
             if (parseFloat(t.amount) === order.amount && (t.status || '').toUpperCase() === 'SUCCESS') {
                 order.status = 'COMPLETED';
                 order.utr = t.bankReferenceNo || 'N/A';
-                await order.save();
-                return res.json({ status: 'COMPLETED', utr: order.utr, amount: order.amount });
+                return res.json(order);
             }
         }
-    } catch (e) {}
+    } catch (err) {}
 
     return res.json({ status: 'PENDING' });
 });
