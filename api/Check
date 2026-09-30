@@ -1,0 +1,46 @@
+app.get('/api/check', async (req, res) => {
+    const amount = parseFloat(req.query.amount);
+
+    try {
+        const bpeUrl = `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?merchantId=${BHARATPE_CONFIG.merchantId}&limit=10`;
+        
+        const response = await axios.get(bpeUrl, {
+            headers: {
+                'token': BHARATPE_CONFIG.token,
+                'Cookie': BHARATPE_CONFIG.cookie,
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+            },
+            timeout: 6000
+        });
+
+        const txns = response.data?.data?.transactions || [];
+
+        // Match transaction
+        for (const t of txns) {
+            const txnAmount = parseFloat(t.amount);
+            const statusUpper = String(t.status || '').toUpperCase();
+
+            // SUCCESS, COMPLETED ya SETTLED koi bhi status chalega
+            if (txnAmount === amount && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper)) {
+                return res.json({
+                    status: "COMPLETED",
+                    amount: txnAmount,
+                    utr: t.bankReferenceNo || t.transactionId || t.bankRefNo || 'N/A'
+                });
+            }
+        }
+
+        // Agar match na mile toh recent transactions debug ke liye show karega
+        return res.json({
+            status: "PENDING",
+            searched_amount: amount,
+            latest_txns: txns.slice(0, 3).map(x => ({ amount: x.amount, status: x.status, utr: x.bankReferenceNo }))
+        });
+
+    } catch (error) {
+        return res.status(500).json({
+            status: "ERROR",
+            error: error.response?.data || error.message
+        });
+    }
+});
