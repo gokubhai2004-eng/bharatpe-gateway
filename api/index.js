@@ -30,7 +30,7 @@ async function fetchBharatPeTransactions(merchantId, token, cookie) {
 }
 
 // =========================================================================
-// 1. NEW ENTERPRISE ENDPOINT: /checkout/create
+// 1. DUAL-MODE ENDPOINT: /checkout/create (Fixed + Open QR)
 // =========================================================================
 app.post('/checkout/create', (req, res) => {
     try {
@@ -45,24 +45,32 @@ app.post('/checkout/create', (req, res) => {
             redirect_url 
         } = req.body;
 
-        if (!amount) {
-            return res.status(400).json({ ok: false, error: "Missing 'amount' parameter" });
+        const targetUpi = upi_id || 'BHARATPE.9K0O0W0A8H734919@unitype';
+        const orderUid = 'BP-' + Math.random().toString(36).substring(2, 9).toUpperCase();
+
+        const inputAmt = parseFloat(amount || 0);
+        const isOpenMode = !inputAmt || isNaN(inputAmt) || inputAmt <= 0;
+
+        let finalAmount = null;
+        let upiUri = '';
+
+        if (isOpenMode) {
+            // Open Mode: Bina amount ka generic QR
+            upiUri = `upi://pay?pa=${targetUpi}&pn=Merchant&cu=INR`;
+        } else {
+            // Fixed Mode: 0.01 se lekar 0.50 tak paise add karega (e.g. 1.03, 1.25)
+            const randomPaise = (Math.floor(Math.random() * 50) + 1) / 100;
+            finalAmount = (inputAmt + randomPaise).toFixed(2);
+            upiUri = `upi://pay?pa=${targetUpi}&pn=Merchant&am=${finalAmount}&cu=INR`;
         }
 
-        // Conflict-free random decimal generation (e.g. ₹349.42)
-        const baseAmt = parseFloat(amount);
-        const randomPaise = (Math.floor(Math.random() * 89) + 10) / 100;
-        const finalAmount = (baseAmt + randomPaise).toFixed(2);
-
-        const orderUid = 'BP-' + Math.random().toString(36).substring(2, 9).toUpperCase();
-        const targetUpi = upi_id || 'BHARATPE.9K0O0W0A8H734919@unitype';
-        const upiUri = `upi://pay?pa=${targetUpi}&pn=Merchant&am=${finalAmount}&cu=INR`;
         const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiUri)}`;
 
         // Stateless Token Payload (Zero Database Required)
         const tokenPayload = {
             order_uid: orderUid,
-            amount: parseFloat(finalAmount),
+            mode: isOpenMode ? 'OPEN' : 'FIXED',
+            amount: finalAmount ? parseFloat(finalAmount) : null,
             merchant_id: merchant_id,
             merchant_token: merchant_token,
             cookie: cookie,
@@ -77,13 +85,14 @@ app.post('/checkout/create', (req, res) => {
 
         return res.json({
             ok: true,
+            mode: isOpenMode ? 'OPEN' : 'FIXED',
             order_uid: orderUid,
             pay_url: `https://${req.headers.host}/pay/${orderUid}`,
-            amount: finalAmount,
+            amount: finalAmount || 'OPEN',
             qr_url: qrUrl,
             upi_uri: upiUri,
             upi_id: targetUpi,
-            amount_charged: finalAmount,
+            amount_charged: finalAmount || 'USER_CHOICE',
             merchant_name: 'BharatPe Merchant',
             verify_url: `https://${req.headers.host}/checkout/verify`,
             verify_token: verifyToken,
@@ -95,7 +104,7 @@ app.post('/checkout/create', (req, res) => {
 });
 
 // =========================================================================
-// 2. NEW ENTERPRISE ENDPOINT: /checkout/verify (Polling + Webhook Dispatch)
+// 2. DUAL-MODE ENDPOINT: /checkout/verify (Polling + Webhook Dispatch)
 // =========================================================================
 app.post('/checkout/verify', async (req, res) => {
     try {
@@ -112,29 +121,47 @@ app.post('/checkout/verify', async (req, res) => {
         }
 
         const txns = await fetchBharatPeTransactions(order.merchant_id, order.merchant_token, order.cookie);
-        const checkAmount = parseFloat(order.amount);
 
         for (const t of txns) {
             const txnAmount = parseFloat(t.amount || t.txnAmount || 0);
             const statusUpper = String(t.status || t.txnStatus || '').toUpperCase();
 
-            if (Math.abs(txnAmount - checkAmount) < 0.01 && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper)) {
-                const utr = t.bankReferenceNo || t.transactionId || t.bankRefNo || 'N/A';
-                const txnId = 'BP-TXN-' + Math.floor(100000 + Math.random() * 900000);
-                const payerName = t.payerName || 'Verified Payer';
+            // Transaction timestamp validation (Fresh payment check)
+            const txnTime = new Date(t.paymentTimestamp || t.transactionTime || t.createdAt || Date.now()).getTime();
+            const isFresh = txnTime >= (order.created_at - 60000);
 
-                // Signed Webhook trigger (agar configured ho)
-                if (order.webhook_url) {
-                    dispatchSignedWebhook(order, utr, txnId, payerName);
+            if (['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper) && txnAmount > 0) {
+                let isMatched = false;
+
+                if (order.mode === 'FIXED') {
+                    // Exact 0.01 - 0.50 decimal match
+                    if (Math.abs(txnAmount - order.amount) < 0.01) {
+                        isMatched = true;
+                    }
+                } else if (order.mode === 'OPEN' && isFresh) {
+                    // Open mode me recent fresh payment match
+                    isMatched = true;
                 }
 
-                return res.json({
-                    status: "SUCCESS",
-                    amount: txnAmount,
-                    utr: utr,
-                    txn_id: txnId,
-                    payer_name: payerName
-                });
+                if (isMatched) {
+                    const utr = t.bankReferenceNo || t.transactionId || t.bankRefNo || 'N/A';
+                    const txnId = 'BP-TXN-' + Math.floor(100000 + Math.random() * 900000);
+                    const payerName = t.payerName || 'Verified Payer';
+
+                    // Signed Webhook trigger (agar configured ho)
+                    if (order.webhook_url) {
+                        dispatchSignedWebhook(order, txnAmount, utr, txnId, payerName);
+                    }
+
+                    return res.json({
+                        status: "SUCCESS",
+                        mode: order.mode,
+                        amount: txnAmount,
+                        utr: utr,
+                        txn_id: txnId,
+                        payer_name: payerName
+                    });
+                }
             }
         }
 
@@ -213,12 +240,13 @@ app.get('/api/check', async (req, res) => {
 // =========================================================================
 // 4. SIGNED WEBHOOK DISPATCHER (HMAC-SHA256)
 // =========================================================================
-async function dispatchSignedWebhook(order, utr, txnId, payerName) {
+async function dispatchSignedWebhook(order, paidAmount, utr, txnId, payerName) {
     const payload = {
         event: 'order.paid',
         data: {
             order_uid: order.order_uid,
-            amount: String(order.amount),
+            mode: order.mode,
+            amount: String(paidAmount),
             utr: utr,
             txn_id: txnId,
             merchant: order.merchant_id,
@@ -241,12 +269,12 @@ async function dispatchSignedWebhook(order, utr, txnId, payerName) {
             timeout: 5000
         });
     } catch (e) {
-        // Log locally if customer endpoint fails
+        // Safe fail
     }
 }
 
 app.get('/', (req, res) => {
-    res.send("BharatPe Enterprise Gateway Engine Live!");
+    res.send("BharatPe Dual Enterprise Engine Live!");
 });
 
 module.exports = app;
