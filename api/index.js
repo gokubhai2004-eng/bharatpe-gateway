@@ -1,151 +1,224 @@
-const crypto = require('crypto');
+const express = require('express');
 const axios = require('axios');
+const crypto = require('crypto');
 
-module.exports = async (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+const app = express();
+app.use(express.json());
 
-    if (req.method === 'OPTIONS') return res.status(200).end();
+// =========================================================================
+// HELPER: CORE BHARATPE SETTLEMENT SCANNER (AAPKA EXACT FAST ENGINE)
+// =========================================================================
+async function fetchBharatPeTransactions(merchantId, token, cookie) {
+    const now = Date.now();
+    const yesterday = now - (24 * 60 * 60 * 1000);
 
-    const url = new URL(req.url, `https://${req.headers.host}`);
-    const pathname = url.pathname;
+    const bpeUrl = `https://payments-tesseract.bharatpe.in/api/v1/merchant/transactions?module=PAYMENT_QR&merchantId=${merchantId}&sDate=${yesterday}&eDate=${now}&pageSize=15&pageCount=0&isFromOtDashboard=1`;
 
-    // =========================================================================
-    // 1. ENDPOINT: /checkout/create
-    // =========================================================================
-    if ((pathname === '/checkout/create' || pathname === '/api/create') && req.method === 'POST') {
-        try {
-            const { 
-                amount, 
-                upi_id, 
-                merchant_id, 
-                merchant_token, 
-                cookie, 
-                webhook_url, 
-                secret,
-                redirect_url 
-            } = req.body;
+    const response = await axios.get(bpeUrl, {
+        headers: {
+            'token': token,
+            'Cookie': cookie,
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Referer': 'https://merchant.bharatpe.com/',
+            'Origin': 'https://merchant.bharatpe.com'
+        },
+        timeout: 8000
+    });
 
-            if (!amount) {
-                return res.status(400).json({ ok: false, error: 'Amount is required' });
-            }
+    return response.data?.data?.transactions || response.data?.transactions || [];
+}
 
-            // Conflict-free decimal calculation (e.g., 349.42)
-            const baseAmt = parseFloat(amount);
-            const randomPaise = (Math.floor(Math.random() * 89) + 10) / 100;
-            const finalAmount = (baseAmt + randomPaise).toFixed(2);
+// =========================================================================
+// 1. NEW ENTERPRISE ENDPOINT: /checkout/create
+// =========================================================================
+app.post('/checkout/create', (req, res) => {
+    try {
+        const { 
+            amount, 
+            upi_id, 
+            merchant_id, 
+            merchant_token, 
+            cookie, 
+            webhook_url, 
+            secret,
+            redirect_url 
+        } = req.body;
 
-            const orderUid = 'BP-' + Math.random().toString(36).substring(2, 9).toUpperCase();
-            const targetUpi = upi_id || 'BHARATPE.9K0O0W0A8H734919@unitype';
-            const upiUri = `upi://pay?pa=${targetUpi}&pn=Store&am=${finalAmount}&cu=INR`;
-            const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiUri)}`;
-
-            // Stateless Token Payload (Zero Database Required)
-            const tokenPayload = {
-                order_uid: orderUid,
-                amount: finalAmount,
-                merchant_id: merchant_id || '67978226',
-                merchant_token: merchant_token || '',
-                cookie: cookie || '',
-                webhook_url: webhook_url || null,
-                secret: secret || 'whsec_default_secret',
-                redirect_url: redirect_url || null,
-                upi_id: targetUpi,
-                created_at: Date.now()
-            };
-
-            const verifyToken = Buffer.from(JSON.stringify(tokenPayload)).toString('base64');
-
-            return res.status(200).json({
-                ok: true,
-                order_uid: orderUid,
-                pay_url: `https://${req.headers.host}/pay/${orderUid}`,
-                amount: finalAmount,
-                qr_url: qrUrl,
-                upi_uri: upiUri,
-                upi_id: targetUpi,
-                amount_charged: finalAmount,
-                merchant_name: 'BharatPe Merchant',
-                verify_url: `https://${req.headers.host}/checkout/verify`,
-                verify_token: verifyToken,
-                expires_in: 600
-            });
-        } catch (err) {
-            return res.status(500).json({ ok: false, error: err.message });
+        if (!amount) {
+            return res.status(400).json({ ok: false, error: "Missing 'amount' parameter" });
         }
+
+        // Conflict-free random decimal generation (e.g. ₹349.42)
+        const baseAmt = parseFloat(amount);
+        const randomPaise = (Math.floor(Math.random() * 89) + 10) / 100;
+        const finalAmount = (baseAmt + randomPaise).toFixed(2);
+
+        const orderUid = 'BP-' + Math.random().toString(36).substring(2, 9).toUpperCase();
+        const targetUpi = upi_id || 'BHARATPE.9K0O0W0A8H734919@unitype';
+        const upiUri = `upi://pay?pa=${targetUpi}&pn=Merchant&am=${finalAmount}&cu=INR`;
+        const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(upiUri)}`;
+
+        // Stateless Token Payload (Zero Database Required)
+        const tokenPayload = {
+            order_uid: orderUid,
+            amount: parseFloat(finalAmount),
+            merchant_id: merchant_id,
+            merchant_token: merchant_token,
+            cookie: cookie,
+            webhook_url: webhook_url || null,
+            secret: secret || 'whsec_default',
+            redirect_url: redirect_url || null,
+            upi_id: targetUpi,
+            created_at: Date.now()
+        };
+
+        const verifyToken = Buffer.from(JSON.stringify(tokenPayload)).toString('base64');
+
+        return res.json({
+            ok: true,
+            order_uid: orderUid,
+            pay_url: `https://${req.headers.host}/pay/${orderUid}`,
+            amount: finalAmount,
+            qr_url: qrUrl,
+            upi_uri: upiUri,
+            upi_id: targetUpi,
+            amount_charged: finalAmount,
+            merchant_name: 'BharatPe Merchant',
+            verify_url: `https://${req.headers.host}/checkout/verify`,
+            verify_token: verifyToken,
+            expires_in: 600
+        });
+    } catch (err) {
+        return res.status(500).json({ ok: false, error: err.message });
+    }
+});
+
+// =========================================================================
+// 2. NEW ENTERPRISE ENDPOINT: /checkout/verify (Polling + Webhook Dispatch)
+// =========================================================================
+app.post('/checkout/verify', async (req, res) => {
+    try {
+        const token = req.body.t || req.query.t;
+        if (!token) {
+            return res.status(400).json({ status: "ERROR", message: "Token missing" });
+        }
+
+        let order;
+        try {
+            order = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
+        } catch (e) {
+            return res.status(400).json({ status: "ERROR", message: "Invalid verify token" });
+        }
+
+        const txns = await fetchBharatPeTransactions(order.merchant_id, order.merchant_token, order.cookie);
+        const checkAmount = parseFloat(order.amount);
+
+        for (const t of txns) {
+            const txnAmount = parseFloat(t.amount || t.txnAmount || 0);
+            const statusUpper = String(t.status || t.txnStatus || '').toUpperCase();
+
+            if (Math.abs(txnAmount - checkAmount) < 0.01 && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper)) {
+                const utr = t.bankReferenceNo || t.transactionId || t.bankRefNo || 'N/A';
+                const txnId = 'BP-TXN-' + Math.floor(100000 + Math.random() * 900000);
+                const payerName = t.payerName || 'Verified Payer';
+
+                // Signed Webhook trigger (agar configured ho)
+                if (order.webhook_url) {
+                    dispatchSignedWebhook(order, utr, txnId, payerName);
+                }
+
+                return res.json({
+                    status: "SUCCESS",
+                    amount: txnAmount,
+                    utr: utr,
+                    txn_id: txnId,
+                    payer_name: payerName
+                });
+            }
+        }
+
+        return res.json({ status: "PENDING", message: "Payment not received yet" });
+
+    } catch (error) {
+        return res.status(500).json({
+            status: "ERROR",
+            details: error.response?.data || error.message
+        });
+    }
+});
+
+// =========================================================================
+// 3. LEGACY ENDPOINT: /api/check (Purani integrations ke backward compatibility ke liye)
+// =========================================================================
+app.get('/api/check', async (req, res) => {
+    const { merchantId, token, cookie, amount } = req.query;
+
+    if (!merchantId || !token || !cookie) {
+        return res.status(400).json({
+            status: "ERROR",
+            message: "Missing parameters: 'merchantId', 'token', and 'cookie' are required."
+        });
     }
 
-    // =========================================================================
-    // 2. ENDPOINT: /checkout/verify (Polling & Webhook Push)
-    // =========================================================================
-    if ((pathname === '/checkout/verify' || pathname === '/api/verify') && req.method === 'POST') {
-        try {
-            const token = req.body.t || req.query.t;
-            if (!token) {
-                return res.status(400).json({ status: 'ERROR', message: 'Token missing' });
-            }
+    try {
+        const txns = await fetchBharatPeTransactions(merchantId, token, cookie);
+        const checkAmount = parseFloat(amount);
 
-            let order;
-            try {
-                order = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
-            } catch (e) {
-                return res.status(400).json({ status: 'ERROR', message: 'Invalid verify token' });
-            }
+        // Open QR Mode (agar amount missing ya 0 ho)
+        if (!checkAmount || checkAmount === 0 || isNaN(checkAmount)) {
+            for (const t of txns) {
+                const txnAmount = parseFloat(t.amount || t.txnAmount || 0);
+                const statusUpper = String(t.status || t.txnStatus || '').toUpperCase();
 
-            // Direct BharatPe Settlement API Ledger Hit
-            const bpApiUrl = `https://merchant.bharatpe.com/api/v1/merchants/${order.merchant_id}/transactions?module=PAYMENT_QR`;
-            const bpRes = await axios.get(bpApiUrl, {
-                headers: {
-                    'token': order.merchant_token,
-                    'Cookie': order.cookie,
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-                },
-                timeout: 6000
-            }).catch(() => null);
-
-            if (bpRes && bpRes.data && bpRes.data.data) {
-                const txns = bpRes.data.data.transactions || [];
-                const matched = txns.find(tx => parseFloat(tx.amount).toFixed(2) === order.amount);
-
-                if (matched) {
-                    const utr = matched.bankReferenceNo || matched.utr || '423901782341';
-                    const payerName = matched.payerName || 'Verified Payer';
-                    const txnId = 'BP-TXN-' + Math.floor(100000 + Math.random() * 900000);
-
-                    // Webhook Push if URL is present
-                    if (order.webhook_url) {
-                        dispatchSignedWebhook(order, utr, txnId, payerName);
-                    }
-
-                    return res.status(200).json({
-                        status: 'SUCCESS',
-                        amount: order.amount,
-                        utr: utr,
-                        txn_id: txnId,
-                        payer_name: payerName
+                if (txnAmount > 0 && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper)) {
+                    return res.json({
+                        status: "COMPLETED",
+                        recent_received: {
+                            amount: txnAmount,
+                            utr: t.bankReferenceNo || t.transactionId || t.bankRefNo || 'N/A',
+                            payer_name: t.payerName || 'N/A'
+                        }
                     });
                 }
             }
-
-            return res.status(200).json({ status: 'PENDING' });
-        } catch (err) {
-            return res.status(500).json({ status: 'ERROR', error: err.message });
+            return res.json({ status: "PENDING", message: "No recent payments found" });
         }
+
+        // Fixed / Decimal Mode
+        for (const t of txns) {
+            const txnAmount = parseFloat(t.amount || t.txnAmount || 0);
+            const statusUpper = String(t.status || t.txnStatus || '').toUpperCase();
+
+            if (Math.abs(txnAmount - checkAmount) < 0.01 && ['SUCCESS', 'COMPLETED', 'SETTLED'].includes(statusUpper)) {
+                return res.json({
+                    status: "COMPLETED",
+                    amount: txnAmount,
+                    utr: t.bankReferenceNo || t.transactionId || t.bankRefNo || 'N/A',
+                    payer_name: t.payerName || 'N/A'
+                });
+            }
+        }
+
+        return res.json({ status: "PENDING", message: "Payment not received yet" });
+
+    } catch (error) {
+        return res.status(500).json({
+            status: "ERROR",
+            details: error.response?.data || error.message
+        });
     }
+});
 
-    return res.status(404).json({ error: 'Endpoint Not Found' });
-};
-
-// =============================================================================
-// HMAC SHA-256 SIGNED WEBHOOK DISPATCHER
-// =============================================================================
+// =========================================================================
+// 4. SIGNED WEBHOOK DISPATCHER (HMAC-SHA256)
+// =========================================================================
 async function dispatchSignedWebhook(order, utr, txnId, payerName) {
     const payload = {
         event: 'order.paid',
         data: {
             order_uid: order.order_uid,
-            amount: order.amount,
+            amount: String(order.amount),
             utr: utr,
             txn_id: txnId,
             merchant: order.merchant_id,
@@ -168,6 +241,12 @@ async function dispatchSignedWebhook(order, utr, txnId, payerName) {
             timeout: 5000
         });
     } catch (e) {
-        // Log locally if merchant webhook fails
+        // Log locally if customer endpoint fails
     }
 }
+
+app.get('/', (req, res) => {
+    res.send("BharatPe Enterprise Gateway Engine Live!");
+});
+
+module.exports = app;
